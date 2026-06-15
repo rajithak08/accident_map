@@ -101,6 +101,7 @@ _HTML_TEMPLATE = r"""
   const STATES_GEOJSON = __GEOJSON_DATA__;
   const OFFICIAL_DATA = __OFFICIAL_DATA__;     // {year: {state: {accidents, ranking}}}
   const LATEST_YEAR = __LATEST_YEAR__;
+  const CENTROIDS = __CENTROIDS_DATA__;        // {state_name: [lon, lat]}
 
   const ZOOM_THRESHOLD = 6.0;     // zoom level where points take over from columns
   const FADE_RANGE = 1.2;         // smoothness of the crossfade
@@ -109,8 +110,8 @@ _HTML_TEMPLATE = r"""
     longitude: 80.5,
     latitude: 22.5,
     zoom: 4.3,
-    pitch: 45,
-    bearing: -10,
+    pitch: 0,
+    bearing: 0,
     minZoom: 3,
     maxZoom: 12
   };
@@ -258,7 +259,36 @@ _HTML_TEMPLATE = r"""
       }
     });
 
-    return [tileLayer, stateLayer, pointLayer];
+    // Build label data: one entry per state that has data
+    const labelData = Object.entries(currentStateData).map(([name, d]) => {
+      const pos = CENTROIDS[name];
+      if (!pos) return null;
+      return { name, accidents: d.accidents, position: pos };
+    }).filter(Boolean);
+
+    const labelLayer = new deck.TextLayer({
+      id: 'state-labels',
+      data: labelData,
+      pickable: false,
+      visible: colFade > 0.1,
+      opacity: colFade,
+      getPosition: d => d.position,
+      getText: d => `📍 ${d.accidents.toLocaleString()}`,
+      getSize: 13,
+      getColor: [255, 255, 255, 240],
+      getTextAnchor: 'middle',
+      getAlignmentBaseline: 'bottom',
+      fontFamily: 'Arial, sans-serif',
+      fontWeight: 'bold',
+      outlineWidth: 3,
+      outlineColor: [0, 0, 0, 200],
+      fontSettings: { sdf: true },
+      updateTriggers: {
+        getText: [FILTERS.source, FILTERS.year, FILTERS.month, FILTERS.crashType]
+      }
+    });
+
+    return [tileLayer, stateLayer, pointLayer, labelLayer];
   }
 
   let viewState = {...INITIAL_VIEW_STATE};
@@ -442,6 +472,26 @@ _HTML_TEMPLATE = r"""
 """
 
 
+def build_state_centroids(geojson_obj):
+    """Compute approximate centroid (mean of coordinates) for each state polygon."""
+    centroids = {}
+    for feat in geojson_obj.get("features", []):
+        name = feat["properties"].get("st_nm", "")
+        geom = feat["geometry"]
+        coords = []
+        if geom["type"] == "Polygon":
+            coords = geom["coordinates"][0]
+        elif geom["type"] == "MultiPolygon":
+            # pick the largest ring
+            largest = max(geom["coordinates"], key=lambda p: len(p[0]))
+            coords = largest[0]
+        if coords:
+            lons = [c[0] for c in coords]
+            lats = [c[1] for c in coords]
+            centroids[name] = [round(sum(lons)/len(lons), 4), round(sum(lats)/len(lats), 4)]
+    return centroids
+
+
 def build_points(points_df, max_points=None):
     """points_df: the cleaned news_crashes dataframe/records"""
     df = points_df
@@ -477,6 +527,7 @@ def render_html(points_df, state_stats_records, geojson_obj, height=640, max_poi
     points = build_points(points_df, max_points=max_points)
     official_data, years = build_official_data(state_stats_records)
     latest_year = years[-1] if years else 2023
+    centroids = build_state_centroids(geojson_obj)
 
     crash_types = sorted(set(p['crash_type'] for p in points if p['crash_type']))
 
@@ -496,4 +547,5 @@ def render_html(points_df, state_stats_records, geojson_obj, height=640, max_poi
     html = html.replace("__YEAR_OPTIONS__", year_options)
     html = html.replace("__MONTH_OPTIONS__", month_options)
     html = html.replace("__CRASHTYPE_OPTIONS__", crashtype_options)
+    html = html.replace("__CENTROIDS_DATA__", json.dumps(centroids))
     return html
